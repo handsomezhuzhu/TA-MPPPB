@@ -1,0 +1,28 @@
+diff --git a/src/cache.cc b/src/cache.cc
+index 6b5cd82..2f5b9c0 100644
+--- a/src/cache.cc
++++ b/src/cache.cc
+@@ -217,7 +217,7 @@ bool CACHE::handle_fill(const fill_type& fill)
+ 
+   auto metadata_thru = impl_prefetcher_cache_fill(module_address(fill), get_set_index(fill.address), way_idx, (fill.type == access_type::PREFETCH),
+                                                   evicting_address, fill.data_promise->pf_metadata);
+-  impl_replacement_cache_fill(fill.cpu, get_set_index(fill.address), way_idx, module_address(fill), fill.ip, evicting_address, fill.type);
++  impl_replacement_cache_fill(fill.cpu, get_set_index(fill.address), way_idx, fill.address, fill.ip, evicting_address, fill.type);
+ 
+   if (way != set_end) {
+     if (way->valid && way->prefetch) {
+@@ -265,9 +265,12 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
+     metadata_thru = impl_prefetcher_cache_operate(module_address(handle_pkt), handle_pkt.ip, hit, useful_prefetch, handle_pkt.type, metadata_thru);
+   }
+ 
+-  // update replacement policy
++  // Patch (MPPPB reproduction): hand the unaligned address to the replacement
++  // module so that block-offset features can see bits below OFFSET_BITS.
++  // find_victim already receives the unaligned address in this revision, so
++  // this only makes the three callbacks consistent.
+   const auto way_idx = std::distance(set_begin, way);
+-  impl_update_replacement_state(handle_pkt.cpu, get_set_index(handle_pkt.address), way_idx, module_address(handle_pkt), handle_pkt.ip, {}, handle_pkt.type,
++  impl_update_replacement_state(handle_pkt.cpu, get_set_index(handle_pkt.address), way_idx, handle_pkt.address, handle_pkt.ip, {}, handle_pkt.type,
+                                 hit);
+ 
+   if (hit) {

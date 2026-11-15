@@ -1,0 +1,13 @@
+# Build & local simulation artifacts
+env/
+build/
+bin/
+*.o
+*.d
+*.a
+traces/
+__pycache__/
+.venv/
+*.log
+*.tmp
+.DS_Store

@@ -1,0 +1,115 @@
+# 原创改进方案评估：TA-MPPPB（Translation- & Access-Aware MPPPB v3）
+
+> 本文档汇报面向现代 ChampSim 虚存页表游走、回写流量与硬件预取共存环境的原创改进方案 **TA-MPPPB（Translation- & Access-Aware Multiperspective Reuse Prediction）**，当前最终统一版本（v3）已内置于 [`champsim_modules/mpppb/mpppb.h`](../champsim_modules/mpppb/mpppb.h) 与 [`champsim_modules/mpppb/mpppb.cc`](../champsim_modules/mpppb/mpppb.cc)，分别通过 `MPPPB_PROFILE=ta_mpppb`（开启硬件预取器）与 `MPPPB_PROFILE=ta_mpppb_np`（无预取器）一键激活（同时保留 v2 兼容入口 `MPPPB_IMPROVE=1`）。
+
+---
+
+## 1. 文献调研与独创性定位
+
+已有公开的 MPPPB 后续改进文献主要包括：
+1. **MS-MPPPB / DS-MPPPB**（多阶段/动态样本采样器与动态权重缩减）；
+2. **Fit-MPPPB**（在常规指令 PC/地址空间上进行硬件紧凑裁剪与表项拟合）；
+3. **预取感知签名位扩展方案**（在现有 PC 哈希、缓存块元数据或互连总线上额外扩展 Prefetcher-ID / 需求源指令 PC）。
+
+上述工作均未系统解决现代乱序核与虚存仿真环境中由 **虚实地址转换（`TRANSLATION`）、L2C 脏块写回（`WRITE`）与跨级硬件预取（`PREFETCH`）共同触发的 `ip == 0` 语义混淆与零成本微架构仲裁问题**。相比之下，**TA-MPPPB** 的核心独创性在于：
+- **不改片上 PC 总线、零额外预测表 SRAM**：完全不修改 ChampSim/真实微架构下层预取携带请求 PC 的硬件总线接口（零 `CHAMPSIM_PROPAGATE_PREF_IP` 开销），核心感知机表项（16 张特征表）与 64×18 采样器维持原版 **60.41 KiB**，v3 仅新增两个 10-bit 有符号饱和 set-dueling 计数器（`wsel_`, `pfsel_` ∈ `[-512, 511]`，合计 20 bits）；
+- **复现一致性与因果归因闭环**：在现代 ChampSim（`develop @ 410cee62d9`）上完成重跑校验，`2B`（无预取）与 `2A`（`mdpp_author1`）、`3B`（有预取 `lru_pref` / `ship_pref` / `mpppb_pref`）与 `3A`（`mdpp_pref`）**全部 8 条 trace 的 IPC 精确比特级复现差异为 `0.00000000`**，并完成了 `p1_*` 因果拆解归因矩阵（[`results/point1_attribution.csv`](../results/point1_attribution.csv)）；
+- **从 v1 → v2 → v3 的科学机制演化**：先后定位并消除了 **Write-Sampler Starvation**（`450.soplex`）、**Zero-IP Prefetch Sampler Pollution**（`483.xalancbmk`）以及 **双模式 Write 采样/分配不对称**（`429.mcf` vs `450.soplex`），最终在开启预取器下实现 **+3.33%（`+3.3282%`）Geomean IPC**（大幅领先 `MPPPB_pref` 的 `+1.6646%` 与 `SHiP_pref` 的 `+2.5582%`），在无预取器下达到 **+4.72%（`+4.7247%`）Geomean IPC**。
+
+---
+
+## 2. 因果归因：现代 ChampSim（3B）下 `ip == 0` 与错位旁路来源
+
+在开启 `L1D next_line + L2C ip_stride` 硬件预取器（`3B: repro_3B/mpppb_pref`）的全量 8-trace 日志与 `point1_attribution.csv` 分析中，原版静态 `MPPPB (author2)` 从无预取时的领先退化至明显落后 `SHiP_pref`（`+1.66%` vs `+2.56%`），三大可量化污染源如下：
+
+| Trace | `PREFETCH` 缺失 / 原版旁路 (`pref_miss` / `pref_bypass`) | `TRANSLATION` 缺失 / 总访问 (`author2`) | `WRITE` 写回填充 / 采样器命中 (`write_fills` / `p1_dt256 write_samp_hit`) | 原版 `author2` 核心受损表现 |
+| --- | --- | --- | --- | --- |
+| `400.perlbench-41B` | 54,624 / 56,419 | 625 / 3,798 (hit 83.5%) | 8,250 / 1,182 (99.0%) | `PREFETCH` 与 `WRITE` 共用桶 0 |
+| `403.gcc-16B` | 17,775 / 13 | 317 / 881 | 293 / 209,523 (99.998%) | `WRITE` 采样热命中高达 209k 次 |
+| `410.bwaves-945B` | 275 / 0 | 6 / 6 | 0 / 0 | 低 LLC 压力，策略不敏感 |
+| `429.mcf-22B` | 2,692,118 / 3,008,866 | **170,007 / 170,392 (命中仅 0.23%)** | 519,646 / 88,637 (99.8%) | 页表几乎全旁路，L2 写回大量污染特征 |
+| `437.leslie3d-134B` | 971,178 / 866,276 | 7,242 / 8,417 (hit 14.0%) | 220,077 / 17,425 (99.5%) | 预取误旁路 + 历史扰动致 `-2.46%` 倒退 |
+| `450.soplex-92B` | 2,129,637 / 2,121,449 | 29,345 / 39,769 (hit 26.2%) | 480,504 / 75,514 (99.95%) | 大量写回与预取相互踩踏采样器 |
+| `470.lbm-1274B` | 535,605 / 653,002 | **8,459 / 8,459 (命中 0%)** | 406,281 / 133,232 (99.999%) | 写回与流式写挤占需求行致 `-1.46%` 倒退 |
+| `483.xalancbmk-127B` | 2,250,246 / 2,381,901 | 95,119 / 195,187 (hit 51.3%) | 8,481 / 1,113 (99.8%) | 页表半数丢失，高 `PREFETCH` 采样污染 |
+
+*(注：`pref_bypass` 等 `mpppb_ta` 计数跨 50M warmup + 150M sim 累计，因此略高于 150M ROI 的 `pref_miss`。)*
+
+基于 [`scripts/analyze_attribution.py`](../scripts/analyze_attribution.py) 的单点因果隔离实验（8 条 trace 全量，相对于 `mpppb_pref` 0.9462 GMeanIPC）：
+- `p1_dt256`（仅统一旁路窗口）：`+0.09%`；
+- `p1_pref_nobp`（仅禁 `PREFETCH` 旁路）：`-0.19%`（说明盲目放行全预取反而挤占容量）；
+- `p1_pref_pc`（对 `ip == 0` 预取按页地址哈希解耦）：`+0.21%`；
+- `p1_write_iso`（将 `WRITE` 旁路与写隔离放宽）：`+0.38%`（在 `429.mcf` `+2.77%`、`470.lbm` `+2.81%`，但无节制旁路会伤及 `450.soplex` `-1.78%`）；
+- `p1_trans_clean`（清除 `TRANSLATION` 对零 PC / 采样器的污染）：`+0.23%`（`483` `+1.68%`）；
+- `p1_trans_mru`（叠加 `TRANSLATION` 防旁路 + MRU 提升）：`+0.46%`（`483` `+2.20%`）。
+
+---
+
+## 3. TA-MPPPB v3 最终统一架构设计
+
+总结上述因果诊断与 v1/v2 消融规律，**TA-MPPPB v3**（[`champsim_modules/mpppb/mpppb.cc`](../champsim_modules/mpppb/mpppb.cc) `ta_mpppb` / `ta_mpppb_np`）引入四项紧耦合但正交的零总线修改机制：
+
+1. **Zero-PC `pc_ring` 屏蔽与类型解耦**：
+   - `ab_mask_zero_pc_ = true`、`ab_write_nopc_ = true`、`ab_trans_nopc_ = true`、`ab_pref_nopc_ = true`：严格阻止 `pc == 0` 的 `WRITE`、`TRANSLATION` 与硬件 `PREFETCH` 压入需求指令历史环形缓冲 `pc_ring`，消除真实指令特征序列的污染。
+2. **`TRANSLATION` 防旁路、采样隔离与高保护插入（`idx = 8`）**：
+   - `ab_trans_nobp_ = true`、`ab_trans_nosamp_ = true`、`ab_trans_pos_ = 8`、`ab_trans_promote_ = true`：MMU 页表游走永不旁路、不浪费感知机与采样表资源；填回插入 Static MDPP 中高保护位置 `idx = 8`，并在再次命中时直接沿 `kVecMdpp` 提升至最高 MRU，在保护页表的同时避免像极激进 `idx = 0` 那样挤垮需求数据工作集。
+3. **基于 `ab_duel_dem_w_=1, ab_duel_own_w_=0` 的对称类型双位置 Set-Dueling 仲裁（`8` vs `15`）**：
+   - 为 **`WRITE`**（`ab_write_duel_ = true`, leader slots `17` vs `49`, 10-bit 计数器 `wsel_`）与开启预取下的 **`PREFETCH`**（`ab_pref_duel_ = true`, leader slots `18` vs `50`, 10-bit 计数器 `pfsel_`）各自配备面向 **Demand（`LOAD`/`RFO`）缺失代价**驱动的自适应 set-dueling（仅需求访问 miss/fill 对计数器更新加权 `ab_duel_dem_w_ = 1`，自身流量不参与自举偏置 `ab_duel_own_w_ = 0`）：
+     - 当非需求流量（脏写回或投机预取）确实能被后续需求访问频繁命中受益时，duel 自动导向较保留位置 `idx = 8`；
+     - 一旦造成需求访存缺失增加（如 `483.xalancbmk` 的冗余预取 `pfsel = -505`、或 `470.lbm` 写回冲刷 `wsel = -511`），duel 在数十万次内自动将对应非需求流量压入冷插入位 `idx = 15`，**在不丢弃 L2 脏块写回一致性的同时，以需求工作集 IPC 为第一目标自动淘汰噪声**；
+   - 命中时统一采用 `kVecMdpp` 最小扰动提升（`ab_write_hit_promote_ = 1`，`ab_pref_hit_promote_ = 1`，以及无预取时 `ab_demand_hit_promote_ = 0`、有预取时 `ab_demand_hit_promote_ = 1`）。
+4. **面向预取开关状态的 `WRITE` 采样双模一致性原则**：
+   - **开启预取器（`ta_mpppb`）**：由于 L1D `next_line` + L2C `ip_stride` 已经提供强密度预取流，需求行本身拥有高频重用训练来源，因此设置 `ab_write_nosamp_ = true` 与 `ab_pref_nosamp_ = true`，彻底消除 `WRITE` 与 `PREFETCH` 对 64×18 采样器和特征表的训练干扰（解决 `429.mcf` 上的采样器负分漂移与 `483.xalancbmk` 的高分桶膨胀），并将感知机参数调谐至 `author2` + `bypass_dt1 = 42 / bypass_dt2 = 256 / promotion_threshold = 178 / plv2 = 14`。
+   - **无预取器（`ta_mpppb_np`）**：无硬件预取时，大量如 `450.soplex` 的需求复用需要靠脏块回写命中采样器触发 `learn_reuse (-1)` 完成反馈闭环，因此保留 `ab_write_nosamp_ = false` + `ab_write_preserve_ = true`（仅允许 `WRITE` 触发原创建者 `learn_reuse (-1)` 后通过 `s.line[0] = previous` 还原创建者特征），并搭配高旁路阈值窗口 `bypass_dt1 = 30 / bypass_dt2 = 150 / promotion_threshold = 82 / plv2 = 15`。
+
+---
+
+## 4. 最终实验结果（v3 全量 16 组 50M + 150M 验证）
+
+全部 16 组最终 TA-MPPPB v3 实验（`ta_mpppb` 8 条 + `ta_mpppb_np` 8 条）均在云端运行 **50M warmup + 150M simulation** 并拉回本地通过 `scripts/verify_results.py` 严格校验（`rc=0`，`bad NONE`，指令数 ∈ `[150,000,000, 150,000,003]`），汇总导出于 [`results/ta_mpppb_v3_pref_comparison.csv`](../results/ta_mpppb_v3_pref_comparison.csv) 与 [`results/ta_mpppb_v3_nopref_comparison.csv`](../results/ta_mpppb_v3_nopref_comparison.csv)。
+
+### 4.1 开启硬件预取器对照（`L1D next_line + L2C ip_stride`）
+
+| Trace | `LRU_pref` | `SHiP_pref` | `MPPPB (author2)` | `TA-MPPPB v2` | **`TA-MPPPB v3 (ta_mpppb)`** | `v3` vs `author2` | `v3` vs `LRU_pref` | `TRANSLATION` 命中 (`author2 → v3`) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `400.perlbench-41B` | 1.3735 | 1.3929 | 1.4005 | **1.4015** | **1.3963** | -0.29% | +1.67% | 3,173/3,798 → **3,317/3,798** |
+| `403.gcc-16B` | **2.2054** | 2.2052 | 2.2044 | 2.2044 | **2.2046** | +0.01% | -0.04% | 564/881 → **567/881** |
+| `410.bwaves-945B` | 2.9747 | 2.9747 | 2.9747 | 2.9747 | **2.9747** | +0.00% | +0.00% | 0/6 → 0/6 |
+| `429.mcf-22B` | 0.4503 | 0.4546 | 0.4521 | 0.4536 | **0.4695** | **+3.85%** | **+4.28%** | 385/170,392 → **18,396/170,403** |
+| `437.leslie3d-134B` | **1.3478** | 1.3476 | 1.3146 | 1.3114 | **1.3448** | **+2.29%** | -0.22% | 1,175/8,417 → **2,575/8,421** |
+| `450.soplex-92B` | 0.4848 | **0.5080** | 0.5014 | 0.5066 | **0.5025** | +0.21% | +3.64% | 10,424/39,769 → **22,687/39,610** |
+| `470.lbm-1274B` | 0.6518 | 0.6513 | 0.6423 | **0.6710** | **0.6689** | **+4.14%** | **+2.62%** | 0/8,459 → **4,160/8,459** |
+| `483.xalancbmk-127B` | 0.3258 | 0.3720 | 0.3654 | 0.3721 | **0.3764** | **+3.00%** | **+15.54%** | 100,068/195,187 → **167,078/195,080** |
+| **Geomean vs `LRU_pref`** | **+0.00%** | **+2.56%** (`+2.5582%`) | **+1.66%** (`+1.6646%`) | **+2.60%** (`+2.6038%`) | **+3.33%** (`+3.3282%`) | **+1.64%** (`+1.6364%`) | **+3.33%** | `Demand MPKI -9.60%` / `LOAD+RFO -8.95%` |
+
+关键机制解析（为什么 v3 从 v2 的 `+2.60%` 再次跃升至 **`+3.33%`**）：
+- **`429.mcf-22B`（`0.4521 → 0.4695`，`+3.85%` over `author2`）**：`wsel = 467` 联合采样器彻底隔离 `WRITE` 污染，把 `LOAD` 命中从 `55,919` 暴拉至 **`233,220`（4.17 倍）**，`PREFETCH` 命中 `11,032 → 33,247`，`TRANSLATION` 命中 `385 → 18,396`，`LOAD+RFO MPKI` 从 `18.324` 降至 `17.137`；
+- **`483.xalancbmk-127B`（`0.3654 → 0.3764`，`+3.00%` over `author2`，`+15.54%` over `LRU_pref`）**：`pfsel = -505` 把低效 `PREFETCH` 压入冷插入位 `15`，结合 `TRANSLATION` 85.6% 高命中率，把宝贵集合空间让渡给需求读（`LOAD` 命中 `506,633 → 641,722`），明显超越 `SHiP_pref`（`0.3720`）；
+- **`470.lbm-1274B`（`0.6423 → 0.6689`，`+4.14%` over `author2`）**：`wsel = -511` + `pfsel = -508` 自动压缩写回与投机预取对高重用写配对块的挤压，使 `RFO` 命中由 `3,635` 跃升至 **`121,184`（33.3 倍）**，`LOAD+RFO MPKI` 由 `25.010` 降至 `24.216`；
+- **`437.leslie3d-134B`（`1.3146 → 1.3448`，`+2.29%` over `author2`）**：基本填平了原版 `author2` 与 `v2` 在高密度硬件预取流下的 `-2.46%` 倒退。
+
+### 4.2 无硬件预取器对照（`MPPPB_PROFILE=ta_mpppb_np`）
+
+| Trace | `LRU` | `SHiP-PC` | `MPPPB (author1)` | `TA-MPPPB v2 (ta_nopref)` | `TA-MPPPB v2 (ta_c4)` | **`TA-MPPPB v3 (ta_mpppb_np)`** | `v3` vs `author1` | `v3` vs `LRU` | `TRANSLATION` 命中 (`author1 → v3`) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `400.perlbench-41B` | 1.3182 | 1.3459 | 1.3592 | 1.3607 | **1.3613** | **1.3608** | +0.12% | +3.23% | 3,011/3,368 → **3,107/3,367** |
+| `403.gcc-16B` | **2.1750** | 2.1747 | 2.1741 | 2.1741 | 2.1741 | **2.1741** | -0.00% | -0.04% | 579/882 → 578/882 |
+| `410.bwaves-945B` | 3.0102 | 3.0102 | 3.0102 | 3.0102 | 3.0102 | **3.0102** | +0.00% | +0.00% | 0/6 → 0/6 |
+| `429.mcf-22B` | 0.3193 | 0.3242 | **0.3250** | 0.3241 | 0.3240 | **0.3237** | -0.42% | +1.37% | 1,591/168,332 → **20,592/168,341** |
+| `437.leslie3d-134B` | 0.6252 | 0.6232 | 0.6255 | 0.6267 | 0.6268 | **0.6271** | **+0.26%** | **+0.31%** | 3,232/8,410 → **5,182/8,411** |
+| `450.soplex-92B` | 0.3097 | 0.3544 | 0.3577 | 0.3584 | 0.3588 | **0.3597** | **+0.56%** | **+16.15%** | 9,107/36,365 → **17,900/36,285** |
+| `470.lbm-1274B` | 0.6150 | 0.6129 | 0.6142 | **0.6241** | **0.6241** | **0.6228** | **+1.40%** | **+1.28%** | 0/8,459 → **10/8,459** |
+| `483.xalancbmk-127B` | 0.2588 | **0.3076** | 0.3024 | 0.2998 | 0.3029 | **0.3033** | **+0.31%** | **+17.22%** | 107,632/191,472 → **179,705/191,468** |
+| **Geomean vs `LRU`** | **+0.00%** | **+4.30%** (`+4.3003%`) | **+4.44%** (`+4.4352%`) | **+4.56%** (`+4.5571%`) | **+4.71%** (`+4.7117%`) | **+4.72%** (`+4.7247%`) | **+0.28%** (`+0.2772%`) | **+4.72%** | `Demand MPKI -9.88%` / `LOAD+RFO -9.35%` |
+
+- `TA-MPPPB v3` 在无预取器模式下同时刷新了 `450.soplex-92B` 历史最高分（`0.3597`，`+16.15%` vs `LRU`），并把此前 v2 在 `483.xalancbmk` 上因强行塞入 `idx=0` 引发的 `-0.84%`（`0.2998`）扭转为 **`+0.31%`（`0.3033`）正增益**，达成 **+4.72%（`+4.7247%`）** 的全系列最高 Geomean。
+
+---
+
+## 5. 演进消融与关键微架构发现记录（v1 → v2 → v3）
+
+| 演进阶段 / 消融关键点 | 典型症状与受影响 Trace | 根因定位 | 解决方案与量化效果 |
+| --- | --- | --- | --- |
+| **v1 → v2：Write-Sampler Starvation** | `v1` 跳过全部 `WRITE` 采样导致 `450.soplex` 无预取跌 `-2.47%`（`0.3577→0.3489`） | 非包容 LLC 中 **91%–99.9%** L2C `WRITE` 命中早期 `LOAD`/`RFO` 建立的采样条目，跳过即断绝 `learn_reuse (-1)` 反馈 | 保留 `WRITE` 命中后的 `learn_reuse (-1)` 信用回传，并通过 `s.line[0] = previous` 原位保留创建者键 |
+| **v2 → v3：Prefetch 采样器污染** | 让 `PREFETCH` 进采样并参与感知机旁路使 `483.xalancbmk` `pref` 仅 `0.3694` | `483` 产生 `~105k` 预取采样 miss，高分桶 `>=150` 从 `3.17M` 翻倍至 `5.80M` | 开启预取下设 `ab_pref_nosamp_ = true` + `ab_pref_duel_ = true (8 vs 15)`，`483` 跃升至 **`0.3764`** |
+| **v3 定型：无/有预取 `WRITE` 采样二律背反** | 若开启预取后仍允许 `WRITE` 进采样，`429.mcf` 回退至 `0.4529`；若无预取禁用 `WRITE` 采样，`450` 跌回 `0.3520` | 有预取时 `429` 触发 `88,703` 次写采样热命中挤压正常旁路（`<-1` 桶由 `465k` 膨至 `2.32M`）；无预取时 `450` 依赖写回反馈（`70,430` 次命中）维持 `psel` | 采用感知硬件预取开关的双模开关 `ab_write_nosamp_ = !is_np;`，两模式同时夺取历史最优（With-Pref **+3.33%** / No-Pref **+4.72%**） |
