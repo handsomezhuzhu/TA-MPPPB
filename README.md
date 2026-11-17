@@ -66,14 +66,12 @@ MPPPB_PROFILE=ta_mpppb MPPPB_STATS=1 ./bin/champsim_mpppb_mdpp_pref \
   -w 50000000 -i 150000000 --hide-heartbeat --json out_pref.json trace.champsimtrace.xz
 ```
 
-*(注：`patches/champsim_410cee6_ta_mpppb.patch` 额外包含仅供对照研究的可选 `CHAMPSIM_PROPAGATE_PREF_IP` 开关；TA-MPPPB v3 主结果完全在**不启用**该硬件 PC 总线修改的条件下取得。)*
-
 ---
 
 ## 仓库目录结构
 
 - `champsim_modules/mpppb/`：`TA-MPPPB v3` 与原版 Static MDPP/SHiP/MPPPB 统一替换策略源码（`mpppb.h`, `mpppb.cc`）
-- `patches/`：`cache_offset.patch`（`src/cache.cc` unaligned 访问行内偏移修复）与对照用 `champsim_410cee6_ta_mpppb.patch`
+- `patches/`：`cache_offset.patch`（`src/cache.cc` unaligned 访问行内偏移最小补丁）
 - `configs/`：`champsim_mpppb_mdpp.json`、`champsim_mpppb_mdpp_pref.json` 及 `LRU`/`SHiP` 基线配置
 - `scripts/`：trace 下载（`get_traces.sh`）、结果汇总与校验（`verify_results.py`, `summarize_champsim.py`, `analyze_attribution.py`）
 - `results/`：全量 v3 对比 CSV（`ta_mpppb_v3_pref_comparison.csv`, `ta_mpppb_v3_nopref_comparison.csv`）、因果归因矩阵（`point1_attribution.csv`）及 v2 演进对照表

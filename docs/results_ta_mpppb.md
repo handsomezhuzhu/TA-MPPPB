@@ -12,7 +12,7 @@
 3. **预取感知签名位扩展方案**（在现有 PC 哈希、缓存块元数据或互连总线上额外扩展 Prefetcher-ID / 需求源指令 PC）。
 
 上述工作均未系统解决现代乱序核与虚存仿真环境中由 **虚实地址转换（`TRANSLATION`）、L2C 脏块写回（`WRITE`）与跨级硬件预取（`PREFETCH`）共同触发的 `ip == 0` 语义混淆与零成本微架构仲裁问题**。相比之下，**TA-MPPPB** 的核心独创性在于：
-- **不改片上 PC 总线、零额外预测表 SRAM**：完全不修改 ChampSim/真实微架构下层预取携带请求 PC 的硬件总线接口（零 `CHAMPSIM_PROPAGATE_PREF_IP` 开销），核心感知机表项（16 张特征表）与 64×18 采样器维持原版 **60.41 KiB**，v3 仅新增两个 10-bit 有符号饱和 set-dueling 计数器（`wsel_`, `pfsel_` ∈ `[-512, 511]`，合计 20 bits）；
+- **不改片上 PC 总线、零额外预测表 SRAM**：完全不修改 ChampSim/真实微架构下层预取携带请求 PC 的硬件总线接口，核心感知机表项（16 张特征表）与 64×18 采样器维持原版 **60.41 KiB**，v3 仅新增两个 10-bit 有符号饱和 set-dueling 计数器（`wsel_`, `pfsel_` ∈ `[-512, 511]`，合计 20 bits）；
 - **复现一致性与因果归因闭环**：在现代 ChampSim（`develop @ 410cee62d9`）上完成重跑校验，`2B`（无预取）与 `2A`（`mdpp_author1`）、`3B`（有预取 `lru_pref` / `ship_pref` / `mpppb_pref`）与 `3A`（`mdpp_pref`）**全部 8 条 trace 的 IPC 精确比特级复现差异为 `0.00000000`**，并完成了 `p1_*` 因果拆解归因矩阵（[`results/point1_attribution.csv`](../results/point1_attribution.csv)）；
 - **从 v1 → v2 → v3 的科学机制演化**：先后定位并消除了 **Write-Sampler Starvation**（`450.soplex`）、**Zero-IP Prefetch Sampler Pollution**（`483.xalancbmk`）以及 **双模式 Write 采样/分配不对称**（`429.mcf` vs `450.soplex`），最终在开启预取器下实现 **+3.33%（`+3.3282%`）Geomean IPC**（大幅领先 `MPPPB_pref` 的 `+1.6646%` 与 `SHiP_pref` 的 `+2.5582%`），在无预取器下达到 **+4.72%（`+4.7247%`）Geomean IPC**。
 
