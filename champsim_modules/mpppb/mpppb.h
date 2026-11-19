@@ -118,7 +118,7 @@ private:
   bool author_ = false;        // MDPP + author training + author feature set
   bool author2_ = false;       // CRC2 config 2: single-core MDPP with prefetcher
   bool improve_ = false;       // TA-MPPPB: translation/access-aware reuse prediction & protection
-  // Granular Point 1 causal ablation & Point 2 TA-MPPPB v3 controls (off by default):
+  // Granular Point 1 causal ablation & Point 2 TA-MPPPB controls (off by default):
   bool ab_write_nopc_ = false;
   bool ab_write_nosamp_ = false;
   bool ab_write_preserve_ = false;
@@ -133,6 +133,7 @@ private:
   bool ab_pref_nohash_ = false; // disable 0x9e3779b9^(block>>6) synthetic PC on PREFETCH
   int ab_pref_pos_ = -1;       // >=0 overrides PREFETCH fill PLRU index (instead of score)
   bool ab_mask_zero_pc_ = false; // ignore PC-only / XOR-PC features when ip==0
+  bool ab_keep_pc_ring_ = false; // LOO: re-enable PC-ring updates from zero-PC / non-demand accesses
   int ab_write_pos_ = -1;      // >=0 overrides WRITE fill PLRU index
   int ab_write_hit_promote_ = 0; // 0=score-gated, 1=unconditional kVecMdpp, 2=unconditional MRU(0)
   int ab_pref_hit_promote_ = 0;  // 0=score-gated, 1=unconditional kVecMdpp, 2=unconditional MRU(0)

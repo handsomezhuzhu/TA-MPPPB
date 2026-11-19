@@ -168,7 +168,7 @@ mpppb::mpppb(CACHE* cache)
       plv_[2][0] = 44;
       plv_[2][1] = 15;
     } else if (std::strcmp(profile, "ta_mpppb") == 0 || std::strcmp(profile, "ta_mpppb_np") == 0) {
-      // TA-MPPPB v3: zero-extra-SRAM type-aware arbitration & zero-PC shielding.
+      // TA-MPPPB: zero-extra-SRAM type-aware arbitration & zero-PC shielding.
       const bool is_np = (std::strcmp(profile, "ta_mpppb_np") == 0);
       author_ = true;
       author2_ = !is_np;
@@ -219,19 +219,22 @@ mpppb::mpppb(CACHE* cache)
   }
   if (const char* imp = std::getenv("MPPPB_IMPROVE"); imp != nullptr && imp[0] != '\0' && std::strcmp(imp, "0") != 0)
     improve_ = true;
-  if (const char* abl = std::getenv("MPPPB_ABLATE"); abl != nullptr && abl[0] != '\0') {
-    const auto has_tok = [abl](const char* tok) {
-      const std::size_t n = std::strlen(tok);
-      const char* p = abl;
-      while ((p = std::strstr(p, tok)) != nullptr) {
-        const bool left_ok = (p == abl || p[-1] == ',' || p[-1] == ' ');
-        const bool right_ok = (p[n] == '\0' || p[n] == ',' || p[n] == ' ');
-        if (left_ok && right_ok)
-          return true;
-        p += n;
-      }
+  const auto has_token = [](const char* list, const char* tok) {
+    if (list == nullptr || list[0] == '\0')
       return false;
-    };
+    const std::size_t n = std::strlen(tok);
+    const char* p = list;
+    while ((p = std::strstr(p, tok)) != nullptr) {
+      const bool left_ok = (p == list || p[-1] == ',' || p[-1] == ' ');
+      const bool right_ok = (p[n] == '\0' || p[n] == ',' || p[n] == ' ');
+      if (left_ok && right_ok)
+        return true;
+      p += n;
+    }
+    return false;
+  };
+  if (const char* abl = std::getenv("MPPPB_ABLATE"); abl != nullptr && abl[0] != '\0') {
+    const auto has_tok = [&has_token, abl](const char* tok) { return has_token(abl, tok); };
     if (has_tok("write_nopc"))
       ab_write_nopc_ = true;
     if (has_tok("write_preserve"))
@@ -307,6 +310,38 @@ mpppb::mpppb(CACHE* cache)
     ab_trans_promote_ = std::strcmp(tp, "0") != 0;
   read_env("MPPPB_DUEL_DEM_W", ab_duel_dem_w_);
   read_env("MPPPB_DUEL_OWN_W", ab_duel_own_w_);
+  if (const char* loo = std::getenv("MPPPB_LOO"); loo != nullptr && loo[0] != '\0') {
+    const auto has_loo = [&has_token, loo](const char* tok) { return has_token(loo, tok); };
+    if (has_loo("no_zero_pc")) {
+      ab_mask_zero_pc_ = false;
+      ab_write_nopc_ = false;
+      ab_trans_nopc_ = false;
+      ab_pref_nopc_ = false;
+      ab_keep_pc_ring_ = true;
+    }
+    if (has_loo("no_ptw_prot")) {
+      ab_trans_nobp_ = false;
+      ab_trans_nopc_ = false;
+      ab_trans_nosamp_ = false;
+      ab_trans_duel_ = false;
+      ab_trans_pos_ = -1;
+      ab_trans_promote_ = false;
+    }
+    if (has_loo("no_write_arb")) {
+      ab_write_nosamp_ = false;
+      ab_write_preserve_ = false;
+      ab_write_duel_ = false;
+      ab_write_pos_ = -1;
+      ab_write_hit_promote_ = 0;
+    }
+    if (has_loo("no_pref_arb")) {
+      ab_pref_nobp_ = false;
+      ab_pref_nosamp_ = false;
+      ab_pref_duel_ = false;
+      ab_pref_pos_ = -1;
+      ab_pref_hit_promote_ = 0;
+    }
+  }
   if (const char* base = std::getenv("MPPPB_BASE"); base != nullptr && std::strcmp(base, "mdpp") == 0)
     use_mdpp_ = true;
   read_env("MPPPB_TRAIN_THRESHOLD", train_threshold_);
@@ -1101,10 +1136,11 @@ void mpppb::update_replacement_state(uint32_t triggering_cpu, long set, long way
     }
   }
 
-  const bool skip_pc_ring = ((improve_ || ab_mask_zero_pc_) && pc == 0) ||
-                            (ab_write_nopc_ && type == access_type::WRITE) ||
-                            (ab_trans_nopc_ && type == access_type::TRANSLATION) ||
-                            ((ab_pref_nopc_ || ab_pref_duel_) && type == access_type::PREFETCH);
+  const bool skip_pc_ring = !ab_keep_pc_ring_ &&
+                            (((improve_ || ab_mask_zero_pc_) && pc == 0) ||
+                             (ab_write_nopc_ && type == access_type::WRITE) ||
+                             (ab_trans_nopc_ && type == access_type::TRANSLATION) ||
+                             ((ab_pref_nopc_ || ab_pref_duel_) && type == access_type::PREFETCH));
   if (!skip_pc_ring) {
     core.pc_ring[core.stamps % core.pc_ring.size()] = pc;
     ++core.stamps;
